@@ -7,7 +7,7 @@ import './index.css'
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     const config = encodeURIComponent(JSON.stringify(firebaseConfig))
-    navigator.serviceWorker.register(`/service-worker.js?firebaseConfig=${config}`).catch(error => {
+    navigator.serviceWorker.register(`/firebase-messaging-sw.js?firebaseConfig=${config}`).catch(error => {
       console.error('Não foi possível registrar o service worker:', error)
     })
   })
