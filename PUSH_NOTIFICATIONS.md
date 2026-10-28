@@ -2,8 +2,8 @@
 
 O envio quando o site está fechado usa Firebase Cloud Messaging (FCM) e uma Cloud Function. A configuração precisa ser feita no projeto Firebase antes de publicar o app.
 
-1. No Firebase Console, abra **Configurações do projeto > Cloud Messaging > Configuração da Web Push**, crie/consulte o par de chaves e copie a **chave pública Web Push (VAPID)**.
-2. Na Vercel, abra o projeto em **Settings > Environment Variables** e crie `VITE_FIREBASE_VAPID_KEY` com esse valor. Marque os ambientes em que publica (Production e Preview, se aplicável) e faça um novo deploy: variáveis Vite são incorporadas durante o build, então só salvar a variável não atualiza um deploy existente. Para desenvolvimento local, use a mesma variável no `.env`.
+1. No Firebase Console, abra **Configurações do projeto > Cloud Messaging > Configuração da Web Push**, crie/consulte o par de chaves e copie a **chave pública Web Push (VAPID)**. Não use a API key do Firebase nem a chave privada. A chave pública deve ser um ponto P-256 não comprimido (65 bytes; normalmente começa com `B`).
+2. Na Vercel, abra o projeto em **Settings > Environment Variables** e crie `VITE_FIREBASE_VAPID_KEY` com esse valor, sem aspas nem espaços. Marque os ambientes em que publica (Production e Preview, se aplicável) e faça um novo deploy: variáveis Vite são incorporadas durante o build, então só salvar a variável não atualiza um deploy existente. Para desenvolvimento local, use a mesma variável no `.env`.
 3. No Firebase Console, habilite o Cloud Messaging para o app Web e confirme que Authentication e Firestore estão ativos.
 4. Nas regras atuais do Firestore, permita que cada usuário autenticado leia e escreva somente os próprios tokens:
 

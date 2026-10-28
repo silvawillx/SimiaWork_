@@ -13,7 +13,26 @@ const TrabalhoView = lazy(() => import('./views/TrabalhoView'));
 const IdeiasView = lazy(() => import('./views/IdeiasView'));
 const FinanceiroView = lazy(() => import('./views/FinanceiroView'));
 
-const firebaseVapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY?.trim();
+const firebaseVapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY?.trim().replace(/^['"]|['"]$/g, '');
+
+const validateVapidKey = () => {
+  if (!firebaseVapidKey || firebaseVapidKey.includes('CHAVE_PUBLICA_WEB_PUSH')) {
+    const error = new Error('VITE_FIREBASE_VAPID_KEY is not available in this deployment.');
+    error.code = 'push/vapid-key-missing';
+    throw error;
+  }
+
+  try {
+    const base64 = firebaseVapidKey.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+    if (!/^[A-Za-z0-9+/]+$/.test(base64) || base64.length % 4 === 1) throw new Error('Invalid base64url');
+    const decoded = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='));
+    if (decoded.length !== 65 || decoded.charCodeAt(0) !== 4) throw new Error('Invalid P-256 point');
+  } catch {
+    const error = new Error('VITE_FIREBASE_VAPID_KEY is not a valid uncompressed P-256 public key.');
+    error.code = 'push/vapid-key-invalid';
+    throw error;
+  }
+};
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -44,16 +63,15 @@ export default function App() {
   const [notificationError, setNotificationError] = useState('');
   const pushRegistrationRef = useRef(null);
   const browserNotificationPermission = typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+  const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isStandaloneApp = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 
   const registerPushDevice = (currentUser) => {
     if (pushRegistrationRef.current) return pushRegistrationRef.current;
 
     const registrationPromise = (async () => {
-      if (!firebaseVapidKey || firebaseVapidKey.includes('CHAVE_PUBLICA_WEB_PUSH')) {
-        const error = new Error('VITE_FIREBASE_VAPID_KEY is not available in this deployment.');
-        error.code = 'push/vapid-key-missing';
-        throw error;
-      }
+      validateVapidKey();
 
       const { getMessaging, getToken, isSupported } = await import('firebase/messaging');
       if (!(await isSupported())) {
@@ -92,6 +110,10 @@ export default function App() {
   };
 
   const getPushErrorMessage = (error) => {
+    if (error?.name === 'InvalidAccessError' || error?.message?.includes('applicationServerKey is not valid')) {
+      return 'O navegador rejeitou a chave VAPID: a VITE_FIREBASE_VAPID_KEY deste deploy não é uma chave pública Web Push válida. Copie a chave pública em Firebase Console > Configurações do projeto > Cloud Messaging > Certificados Web Push. Não use a API key nem uma chave privada. Salve a variável na Vercel sem aspas/espaços e faça um novo deploy.';
+    }
+
     switch (error?.code) {
       case 'push/vapid-key-missing':
         return 'A permissão do navegador foi concedida, mas a variável VITE_FIREBASE_VAPID_KEY não chegou a este deploy. Confira as variáveis da Vercel e gere um novo deploy.';
@@ -99,6 +121,8 @@ export default function App() {
         return 'A permissão foi concedida, mas este navegador não oferece suporte ao Firebase Cloud Messaging.';
       case 'messaging/token-subscribe-failed':
         return 'A permissão foi concedida, mas o Firebase não conseguiu registrar este dispositivo. Confira a chave VAPID e a configuração do app Web no Firebase.';
+      case 'push/vapid-key-invalid':
+        return 'A VITE_FIREBASE_VAPID_KEY recebida por este app não tem o formato de chave pública Web Push VAPID. Copie a chave pública dos certificados Web Push do Firebase, salve na Vercel sem aspas/espaços e faça um novo deploy.';
       case 'permission-denied':
         return 'A permissão do navegador foi concedida, mas o Firestore recusou o registro do dispositivo. Confira as regras de acesso à coleção pushTokens.';
       default: {
@@ -195,7 +219,13 @@ export default function App() {
           if (title && document.visibilityState === 'visible') {
             registration.showNotification(`SimiaWork: ${title}`, {
               body: payload.data?.body || '',
-              icon: '/simiawork-192.png'
+              icon: '/simiawork-192.png',
+              badge: '/simiawork-192.png',
+              tag: `simiawork-${payload.messageId || title}`,
+              data: { url: '/' }
+            }).catch(error => {
+              console.error('Não foi possível exibir a notificação neste navegador:', error);
+              setNotificationError('Push ativo, mas o navegador não conseguiu exibir o aviso. Confira a permissão de notificações do sistema.');
             });
           }
         });
@@ -280,6 +310,14 @@ export default function App() {
   const handleAcceptNotifications = async () => {
     setNotificationError('');
     setPushRegistrationError(false);
+    if (isIOSDevice && !isStandaloneApp) {
+      setNotificationError('No iPhone, o Safari só permite notificações push depois que o site é adicionado à Tela de Início e aberto como app.');
+      return;
+    }
+    if (!window.isSecureContext) {
+      setNotificationError('Notificações push exigem conexão segura (HTTPS). Abra o site publicado em HTTPS.');
+      return;
+    }
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator)) {
       setNotificationError('Este navegador não oferece suporte a notificações push.');
       return;
@@ -469,7 +507,8 @@ export default function App() {
                     <span className="text-xs text-gray-500">{pushChoice === 'declined' ? 'Você recusou' : 'Escolha uma opção'}</span>
                   )}
                 </div>
-                {notificationError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{notificationError}</p>}
+                  {isIOSDevice && !isStandaloneApp && <p className="mt-2 text-xs text-gray-500">No iPhone/iPad, notificações push exigem iOS/iPadOS 16.4 ou posterior e o SimiaWork instalado na Tela de Início. Abra o site no Safari e use “Instalar App (PWA)”.</p>}
+                  {notificationError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{notificationError}</p>}
                 <div className="mt-3 flex gap-2">
                   <button onClick={handleAcceptNotifications} disabled={pushLoading || pushEnabled} className="flex-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
                     <BellRing size={14} className="mr-1 inline" />{pushRegistrationError ? 'Tentar novamente' : 'Aceitar'}
@@ -514,7 +553,20 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setInstallHelpVisible(false)}>
           <section role="dialog" aria-modal="true" aria-labelledby="install-help-title" className="w-full max-w-sm rounded-xl bg-white p-5 text-gray-900 shadow-xl dark:bg-gray-800 dark:text-gray-100" onClick={event => event.stopPropagation()}>
             <h2 id="install-help-title" className="mb-2 text-lg font-bold">Instalar SimiaWork</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-300">A instalação direta não está disponível neste navegador agora. No Chrome/Edge, abra o menu e escolha <strong>Instalar SimiaWork</strong> ou <strong>Adicionar à tela inicial</strong>. No Safari do iPhone, toque em <strong>Compartilhar</strong> e depois em <strong>Adicionar à Tela de Início</strong>.</p>
+            {isIOSDevice ? (
+              <div className="space-y-2 text-sm text-gray-600 dark:text-gray-300">
+                <p>Para instalar no iPhone/iPad:</p>
+                <ol className="list-decimal space-y-1 pl-5">
+                  <li>Abra este site no <strong>Safari</strong>.</li>
+                  <li>Toque em <strong>Compartilhar</strong> na barra do Safari.</li>
+                  <li>Escolha <strong>Adicionar à Tela de Início</strong> e confirme em <strong>Adicionar</strong>.</li>
+                  <li>Abra o SimiaWork pelo novo ícone na tela inicial.</li>
+                </ol>
+                <p>O iOS não permite que um site execute essa instalação diretamente por um botão. Depois de adicionar à Tela de Início, você poderá aceitar as notificações push no app.</p>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-600 dark:text-gray-300">No Chrome/Edge, a instalação direta aparece quando o navegador considera o site instalável. Se o prompt não abrir, use o menu do navegador e escolha <strong>Instalar SimiaWork</strong> ou <strong>Adicionar à tela inicial</strong>.</p>
+            )}
             <button onClick={() => setInstallHelpVisible(false)} className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700">Entendi</button>
           </section>
         </div>
