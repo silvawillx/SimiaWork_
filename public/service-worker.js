@@ -10,12 +10,14 @@ if (firebaseConfig) {
     );
     firebase.initializeApp(config);
     firebase.messaging().onBackgroundMessage(payload => {
-      const title = payload.data?.title;
+      const title = payload.notification?.title || (payload.data?.title && `SimiaWork: ${payload.data.title}`);
       if (!title) return;
 
-      self.registration.showNotification(`SimiaWork: ${title}`, {
-        body: payload.data?.body || '',
-        icon: '/simiawork-192.png',
+      return self.registration.showNotification(title, {
+        body: payload.notification?.body || payload.data?.body || '',
+        icon: payload.notification?.icon || '/simiawork-192.png',
+        badge: payload.notification?.badge || '/simiawork-192.png',
+        tag: payload.messageId || `simiawork-${payload.data?.title || title}`,
         data: { url: payload.data?.url || '/' }
       });
     });

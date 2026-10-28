@@ -27,13 +27,22 @@ export const sendNotificationPush = onDocumentCreated('notificacoes/{notificatio
 
   const title = String(notification.title || 'Nova notificação').slice(0, 100);
   const body = String(notification.message || '').slice(0, 300);
+  const displayTitle = `SimiaWork: ${title}`;
 
   for (let offset = 0; offset < devices.length; offset += 500) {
     const batch = devices.slice(offset, offset + 500);
     const response = await getMessaging().sendEachForMulticast({
       tokens: batch.map(device => device.token),
       data: { title, body, url: '/' },
-      webpush: { headers: { TTL: '86400' } }
+      webpush: {
+        headers: { TTL: '86400' },
+        notification: {
+          title: displayTitle,
+          body,
+          icon: '/simiawork-192.png',
+          badge: '/simiawork-192.png'
+        }
+      }
     });
 
     const invalidDevices = response.responses

@@ -215,11 +215,11 @@ export default function App() {
         setPushEnabled(true);
         setPushRegistrationError(false);
         unsubscribeMessage = onMessage(messaging, payload => {
-          const title = payload.data?.title;
+          const title = payload.notification?.title || (payload.data?.title && `SimiaWork: ${payload.data.title}`);
           if (title && document.visibilityState === 'visible') {
-            registration.showNotification(`SimiaWork: ${title}`, {
-              body: payload.data?.body || '',
-              icon: '/simiawork-192.png',
+            registration.showNotification(title, {
+              body: payload.notification?.body || payload.data?.body || '',
+              icon: payload.notification?.icon || '/simiawork-192.png',
               badge: '/simiawork-192.png',
               tag: `simiawork-${payload.messageId || title}`,
               data: { url: '/' }
