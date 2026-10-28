@@ -1,10 +1,10 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { app, db, auth } from './firebase';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, setDoc, doc, serverTimestamp, query, orderBy } from 'firebase/firestore';
 import { 
   LayoutDashboard, Lightbulb, CircleDollarSign, KanbanSquare, 
-  Bell, LogOut, Lock, Sun, Moon, Download, Trash2, BellRing
+  Bell, LogOut, Lock, Sun, Moon, Download, Trash2, BellRing, Menu, X
 } from 'lucide-react';
 
 // Importação assíncrona dos módulos (Lazy Loading - Code Splitting)
@@ -13,10 +13,13 @@ const TrabalhoView = lazy(() => import('./views/TrabalhoView'));
 const IdeiasView = lazy(() => import('./views/IdeiasView'));
 const FinanceiroView = lazy(() => import('./views/FinanceiroView'));
 
+const firebaseVapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY?.trim();
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [installHelpVisible, setInstallHelpVisible] = useState(false);
   const [appInstalled, setAppInstalled] = useState(
@@ -37,7 +40,73 @@ export default function App() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushChoice, setPushChoice] = useState('undecided');
   const [pushLoading, setPushLoading] = useState(false);
+  const [pushRegistrationError, setPushRegistrationError] = useState(false);
   const [notificationError, setNotificationError] = useState('');
+  const pushRegistrationRef = useRef(null);
+  const browserNotificationPermission = typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+
+  const registerPushDevice = (currentUser) => {
+    if (pushRegistrationRef.current) return pushRegistrationRef.current;
+
+    const registrationPromise = (async () => {
+      if (!firebaseVapidKey || firebaseVapidKey.includes('CHAVE_PUBLICA_WEB_PUSH')) {
+        const error = new Error('VITE_FIREBASE_VAPID_KEY is not available in this deployment.');
+        error.code = 'push/vapid-key-missing';
+        throw error;
+      }
+
+      const { getMessaging, getToken, isSupported } = await import('firebase/messaging');
+      if (!(await isSupported())) {
+        const error = new Error('Firebase Cloud Messaging is not supported by this browser.');
+        error.code = 'messaging/unsupported-browser';
+        throw error;
+      }
+
+      const registration = await navigator.serviceWorker.ready;
+      const messaging = getMessaging(app);
+      const token = await getToken(messaging, {
+        vapidKey: firebaseVapidKey,
+        serviceWorkerRegistration: registration
+      });
+
+      if (!token) {
+        const error = new Error('Firebase did not return a registration token.');
+        error.code = 'messaging/token-subscribe-failed';
+        throw error;
+      }
+
+      await setDoc(doc(db, 'pushTokens', currentUser.uid, 'devices', encodeURIComponent(token)), {
+        token,
+        uid: currentUser.uid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+
+      return { messaging, registration };
+    })();
+
+    const trackedPromise = registrationPromise.finally(() => {
+      if (pushRegistrationRef.current === trackedPromise) pushRegistrationRef.current = null;
+    });
+    pushRegistrationRef.current = trackedPromise;
+    return trackedPromise;
+  };
+
+  const getPushErrorMessage = (error) => {
+    switch (error?.code) {
+      case 'push/vapid-key-missing':
+        return 'A permissão do navegador foi concedida, mas a variável VITE_FIREBASE_VAPID_KEY não chegou a este deploy. Confira as variáveis da Vercel e gere um novo deploy.';
+      case 'messaging/unsupported-browser':
+        return 'A permissão foi concedida, mas este navegador não oferece suporte ao Firebase Cloud Messaging.';
+      case 'messaging/token-subscribe-failed':
+        return 'A permissão foi concedida, mas o Firebase não conseguiu registrar este dispositivo. Confira a chave VAPID e a configuração do app Web no Firebase.';
+      case 'permission-denied':
+        return 'A permissão do navegador foi concedida, mas o Firestore recusou o registro do dispositivo. Confira as regras de acesso à coleção pushTokens.';
+      default: {
+        const errorCode = typeof error?.code === 'string' ? ` (${error.code})` : '';
+        return `A permissão do navegador foi concedida, mas houve um erro ao registrar o dispositivo${errorCode}. Tente novamente.`;
+      }
+    }
+  };
 
   useEffect(() => {
     const handleBeforeInstallPrompt = (event) => {
@@ -62,6 +131,25 @@ export default function App() {
     if (darkMode) document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
   }, [darkMode]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') setMobileMenuOpen(false);
+    };
+    const desktopMedia = window.matchMedia('(min-width: 768px)');
+    const closeOnDesktop = event => {
+      if (event.matches) setMobileMenuOpen(false);
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    desktopMedia.addEventListener('change', closeOnDesktop);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      desktopMedia.removeEventListener('change', closeOnDesktop);
+    };
+  }, [mobileMenuOpen]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -89,33 +177,19 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    if (!user || pushChoice !== 'accepted' || typeof Notification === 'undefined' || Notification.permission !== 'granted' || !import.meta.env.VITE_FIREBASE_VAPID_KEY) return;
+    if (!user || pushChoice !== 'accepted' || typeof Notification === 'undefined' || Notification.permission !== 'granted' || !firebaseVapidKey) return;
 
     let active = true;
     let unsubscribeMessage;
 
     const setupPushListener = async () => {
       try {
-        const { getMessaging, getToken, isSupported, onMessage } = await import('firebase/messaging');
-        if (!(await isSupported())) return;
-
-        const registration = await navigator.serviceWorker.ready;
-        const messaging = getMessaging(app);
-        const token = await getToken(messaging, {
-          vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
-          serviceWorkerRegistration: registration
-        });
-
-        if (!token || !active) return;
-
-        await setDoc(doc(db, 'pushTokens', user.uid, 'devices', encodeURIComponent(token)), {
-          token,
-          uid: user.uid,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-
+        const { onMessage } = await import('firebase/messaging');
+        const { messaging, registration } = await registerPushDevice(user);
         if (!active) return;
+
         setPushEnabled(true);
+        setPushRegistrationError(false);
         unsubscribeMessage = onMessage(messaging, payload => {
           const title = payload.data?.title;
           if (title && document.visibilityState === 'visible') {
@@ -127,7 +201,10 @@ export default function App() {
         });
       } catch (error) {
         console.error('Não foi possível configurar as notificações push:', error);
-        if (active) setNotificationError('Não foi possível ativar as notificações neste dispositivo.');
+        if (active) {
+          setPushRegistrationError(true);
+          setNotificationError(getPushErrorMessage(error));
+        }
       }
     };
 
@@ -175,12 +252,12 @@ export default function App() {
     let pushCleanupFailed = false;
     setAuthError('');
     try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && import.meta.env.VITE_FIREBASE_VAPID_KEY) {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && firebaseVapidKey) {
         const { getMessaging, getToken, isSupported } = await import('firebase/messaging');
         if (await isSupported()) {
           const registration = await navigator.serviceWorker.ready;
           const token = await getToken(getMessaging(app), {
-            vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
+            vapidKey: firebaseVapidKey,
             serviceWorkerRegistration: registration
           });
           if (token) await deleteDoc(doc(db, 'pushTokens', user.uid, 'devices', encodeURIComponent(token)));
@@ -202,15 +279,11 @@ export default function App() {
 
   const handleAcceptNotifications = async () => {
     setNotificationError('');
+    setPushRegistrationError(false);
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator)) {
       setNotificationError('Este navegador não oferece suporte a notificações push.');
       return;
     }
-    if (!import.meta.env.VITE_FIREBASE_VAPID_KEY) {
-      setNotificationError('A chave VAPID do Firebase não está configurada neste ambiente.');
-      return;
-    }
-
     if (Notification.permission === 'denied') {
       setNotificationError('As notificações estão bloqueadas pelo navegador. Permita-as nas configurações do site e tente novamente.');
       return;
@@ -218,38 +291,33 @@ export default function App() {
 
     setPushLoading(true);
     try {
-      const permission = await Notification.requestPermission();
+      const permission = Notification.permission === 'granted'
+        ? 'granted'
+        : await Notification.requestPermission();
       if (permission !== 'granted') {
-        setPushChoice('declined');
-        localStorage.setItem(`simiawork-push-consent-${user.uid}`, 'declined');
-        setNotificationError('Você recusou a permissão. Se mudar de ideia, escolha Aceitar; se o navegador bloqueou o pedido, habilite as notificações nas configurações do site.');
+        if (permission === 'denied') {
+          setPushChoice('declined');
+          localStorage.setItem(`simiawork-push-consent-${user.uid}`, 'declined');
+          setNotificationError('O navegador recusou a permissão. Habilite as notificações nas configurações do site e depois escolha Aceitar novamente.');
+        } else {
+          setNotificationError('A janela de permissão foi fechada sem uma escolha. Clique em Aceitar para tentar novamente.');
+        }
         return;
       }
 
-      const { getMessaging, getToken, isSupported } = await import('firebase/messaging');
-      if (!(await isSupported())) {
-        setNotificationError('Este navegador não oferece suporte ao Firebase Cloud Messaging.');
-        return;
-      }
-
-      const registration = await navigator.serviceWorker.ready;
-      const token = await getToken(getMessaging(app), {
-        vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
-        serviceWorkerRegistration: registration
-      });
-      if (!token) throw new Error('O Firebase não retornou um token para este dispositivo.');
-
-      await setDoc(doc(db, 'pushTokens', user.uid, 'devices', encodeURIComponent(token)), {
-        token,
-        uid: user.uid,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
       localStorage.setItem(`simiawork-push-consent-${user.uid}`, 'accepted');
       setPushChoice('accepted');
+      await registerPushDevice(user);
       setPushEnabled(true);
+      setPushRegistrationError(false);
     } catch (error) {
       console.error('Erro ao ativar notificações push:', error);
-      setNotificationError('Falha ao ativar notificações. Verifique a configuração do Firebase e tente novamente.');
+      if (Notification.permission === 'granted') {
+        localStorage.setItem(`simiawork-push-consent-${user.uid}`, 'accepted');
+        setPushChoice('accepted');
+      }
+      setPushRegistrationError(true);
+      setNotificationError(getPushErrorMessage(error));
     } finally {
       setPushLoading(false);
     }
@@ -259,9 +327,10 @@ export default function App() {
     setNotificationError('');
     setPushChoice('declined');
     setPushEnabled(false);
+    setPushRegistrationError(false);
     localStorage.setItem(`simiawork-push-consent-${user.uid}`, 'declined');
 
-    if (typeof Notification === 'undefined' || Notification.permission !== 'granted' || !import.meta.env.VITE_FIREBASE_VAPID_KEY) return;
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted' || !firebaseVapidKey) return;
 
     setPushLoading(true);
     try {
@@ -271,7 +340,7 @@ export default function App() {
       const messaging = getMessaging(app);
       const registration = await navigator.serviceWorker.ready;
       const token = await getToken(messaging, {
-        vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
+        vapidKey: firebaseVapidKey,
         serviceWorkerRegistration: registration
       });
 
@@ -331,36 +400,59 @@ export default function App() {
 
   // APLICATIVO PRINCIPAL
   return (
-    <div className="min-h-screen flex bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors">
-      <aside className="w-64 bg-white dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 flex flex-col z-10">
-        <div className="p-6">
+    <div className="min-h-screen flex min-w-0 bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors">
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          aria-label="Fechar menu lateral"
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+      <aside id="app-sidebar" className={`${mobileMenuOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[min(18rem,85vw)] shadow-2xl' : 'hidden'} md:relative md:inset-auto md:z-10 md:flex md:w-64 md:shadow-none shrink-0 flex-col border-r border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950`}>
+        <div className="flex items-center justify-between p-5 sm:p-6">
           <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-500 to-purple-600 bg-clip-text text-transparent">SimiaWork</h1>
+          <button type="button" aria-label="Fechar menu lateral" className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 md:hidden" onClick={() => setMobileMenuOpen(false)}>
+            <X size={20} />
+          </button>
         </div>
-        <nav className="flex-1 px-4 space-y-2">
-          <SidebarItem icon={<LayoutDashboard size={20}/>} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-          <SidebarItem icon={<Lightbulb size={20}/>} label="Ideias & Base" active={activeTab === 'ideias'} onClick={() => setActiveTab('ideias')} />
-          <SidebarItem icon={<CircleDollarSign size={20}/>} label="Financeiro" active={activeTab === 'financeiro'} onClick={() => setActiveTab('financeiro')} />
-          <SidebarItem icon={<KanbanSquare size={20}/>} label="Trabalho" active={activeTab === 'trabalho'} onClick={() => setActiveTab('trabalho')} />
+        <nav aria-label="Navegação principal" className="flex-1 space-y-2 overflow-y-auto px-3 sm:px-4">
+          <SidebarItem icon={<LayoutDashboard size={20}/>} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setMobileMenuOpen(false); }} />
+          <SidebarItem icon={<Lightbulb size={20}/>} label="Ideias & Base" active={activeTab === 'ideias'} onClick={() => { setActiveTab('ideias'); setMobileMenuOpen(false); }} />
+          <SidebarItem icon={<CircleDollarSign size={20}/>} label="Financeiro" active={activeTab === 'financeiro'} onClick={() => { setActiveTab('financeiro'); setMobileMenuOpen(false); }} />
+          <SidebarItem icon={<KanbanSquare size={20}/>} label="Trabalho" active={activeTab === 'trabalho'} onClick={() => { setActiveTab('trabalho'); setMobileMenuOpen(false); }} />
         </nav>
-        <div className="p-4 border-t border-gray-200 dark:border-gray-800 space-y-2">
+        <div className="space-y-2 border-t border-gray-200 p-3 dark:border-gray-800 sm:p-4">
           {!appInstalled && (
-            <button onClick={handleInstallClick} className="flex items-center gap-3 w-full p-3 rounded-lg text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
+            <button onClick={() => { handleInstallClick(); setMobileMenuOpen(false); }} className="flex w-full items-center gap-3 rounded-lg p-3 text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800">
               <Download size={20} /> <span>Instalar App (PWA)</span>
             </button>
           )}
-          <button onClick={() => setDarkMode(!darkMode)} className="flex items-center gap-3 w-full p-3 rounded-lg text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
+          <button onClick={() => { setDarkMode(!darkMode); setMobileMenuOpen(false); }} className="flex w-full items-center gap-3 rounded-lg p-3 text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800">
             {darkMode ? <Sun size={20} /> : <Moon size={20} />} <span>{darkMode ? 'Modo Claro' : 'Modo Escuro'}</span>
           </button>
-          <button onClick={handleSignOut} className="flex items-center gap-3 w-full p-3 rounded-lg text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10">
+          <button onClick={() => { setMobileMenuOpen(false); handleSignOut(); }} className="flex w-full items-center gap-3 rounded-lg p-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10">
             <LogOut size={20} /> <span>Sair</span>
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col h-screen overflow-hidden relative">
-        <header className="h-16 border-b border-gray-200 dark:border-gray-800 bg-white/50 dark:bg-gray-950/50 backdrop-blur flex items-center justify-between px-8 z-10">
-          <h2 className="text-xl font-semibold capitalize">{activeTab}</h2>
-          <div className="flex items-center gap-4 relative">
+      <main className="relative flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-20 flex min-h-16 items-center justify-between border-b border-gray-200 bg-white/90 px-3 py-2 backdrop-blur dark:border-gray-800 dark:bg-gray-950/90 sm:px-6 lg:px-8">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <button
+              type="button"
+              aria-label={mobileMenuOpen ? 'Fechar menu lateral' : 'Abrir menu lateral'}
+              aria-expanded={mobileMenuOpen}
+              aria-controls="app-sidebar"
+              className="rounded-lg p-2 hover:bg-gray-100 dark:hover:bg-gray-800 md:hidden"
+              onClick={() => setMobileMenuOpen(open => !open)}
+            >
+              {mobileMenuOpen ? <X size={21} /> : <Menu size={21} />}
+            </button>
+            <h2 className="truncate text-lg font-semibold capitalize sm:text-xl">{activeTab}</h2>
+          </div>
+          <div className="relative flex shrink-0 items-center gap-1 sm:gap-3">
             <button onClick={() => { setShowNotifications(!showNotifications); setNotificationError(''); }} aria-label="Abrir notificações" className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 relative">
               <Bell size={20} />
               {notificacoes.filter(n => !n.read).length > 0 && <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white dark:border-gray-900"></span>}
@@ -371,6 +463,8 @@ export default function App() {
                   <h3 className="font-bold">Notificações</h3>
                   {pushEnabled ? (
                     <span className="text-xs font-medium text-green-600 dark:text-green-400">Avisos ativos</span>
+                  ) : pushChoice === 'accepted' && browserNotificationPermission === 'granted' ? (
+                    <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Permissão concedida</span>
                   ) : (
                     <span className="text-xs text-gray-500">{pushChoice === 'declined' ? 'Você recusou' : 'Escolha uma opção'}</span>
                   )}
@@ -378,13 +472,13 @@ export default function App() {
                 {notificationError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{notificationError}</p>}
                 <div className="mt-3 flex gap-2">
                   <button onClick={handleAcceptNotifications} disabled={pushLoading || pushEnabled} className="flex-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
-                    <BellRing size={14} className="mr-1 inline" />Aceitar
+                    <BellRing size={14} className="mr-1 inline" />{pushRegistrationError ? 'Tentar novamente' : 'Aceitar'}
                   </button>
                   <button onClick={handleDeclineNotifications} disabled={pushLoading || pushChoice === 'declined'} className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">
                     Recusar
                   </button>
                 </div>
-                {pushLoading && <p className="mt-2 text-xs text-gray-500">Atualizando sua preferência...</p>}
+                {pushLoading && <p className="mt-2 text-xs text-gray-500">{browserNotificationPermission === 'granted' ? 'Permissão concedida. Registrando este dispositivo...' : 'Aguardando sua escolha no navegador...'}</p>}
                 {notificacoes.length === 0 && <p className="py-4 text-sm text-gray-500">Nenhuma notificação.</p>}
                 {notificacoes.map(n => (
                   <div key={n.id} className={`group flex items-start gap-2 p-2 mb-2 rounded border-l-2 ${n.read ? 'border-transparent opacity-60' : 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'}`}>
@@ -402,7 +496,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8 bg-gray-50 dark:bg-gray-900">
+        <div className="min-w-0 flex-1 overflow-y-auto bg-gray-50 p-4 dark:bg-gray-900 sm:p-6 lg:p-8">
           <Suspense fallback={
             <div className="h-full flex items-center justify-center flex-col gap-4 text-gray-500 dark:text-gray-400">
               <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>

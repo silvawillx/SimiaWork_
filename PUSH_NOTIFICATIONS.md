@@ -2,9 +2,10 @@
 
 O envio quando o site está fechado usa Firebase Cloud Messaging (FCM) e uma Cloud Function. A configuração precisa ser feita no projeto Firebase antes de publicar o app.
 
-1. No Firebase Console, abra **Configurações do projeto > Cloud Messaging** e crie/consulte o certificado Web Push. Adicione a chave pública como `VITE_FIREBASE_VAPID_KEY` nas variáveis locais e no ambiente de produção.
-2. No Firebase Console, habilite o Cloud Messaging para o app Web e confirme que Authentication e Firestore estão ativos.
-3. Nas regras atuais do Firestore, permita que cada usuário autenticado leia e escreva somente os próprios tokens:
+1. No Firebase Console, abra **Configurações do projeto > Cloud Messaging > Configuração da Web Push**, crie/consulte o par de chaves e copie a **chave pública Web Push (VAPID)**.
+2. Na Vercel, abra o projeto em **Settings > Environment Variables** e crie `VITE_FIREBASE_VAPID_KEY` com esse valor. Marque os ambientes em que publica (Production e Preview, se aplicável) e faça um novo deploy: variáveis Vite são incorporadas durante o build, então só salvar a variável não atualiza um deploy existente. Para desenvolvimento local, use a mesma variável no `.env`.
+3. No Firebase Console, habilite o Cloud Messaging para o app Web e confirme que Authentication e Firestore estão ativos.
+4. Nas regras atuais do Firestore, permita que cada usuário autenticado leia e escreva somente os próprios tokens:
 
    ```text
    match /pushTokens/{uid}/devices/{deviceId} {
@@ -14,7 +15,7 @@ O envio quando o site está fechado usa Firebase Cloud Messaging (FCM) e uma Clo
 
    Acrescente esse bloco às regras existentes sem substituir as regras das outras coleções.
    As regras da coleção `notificacoes` também devem permitir exclusão para usuários autenticados, respeitando a política de acesso já usada pelo app.
-4. No terminal, selecione o projeto Firebase e publique a função:
+5. No terminal, selecione o projeto Firebase e publique a função:
 
    ```sh
    firebase use SEU_PROJECT_ID
@@ -23,6 +24,6 @@ O envio quando o site está fechado usa Firebase Cloud Messaging (FCM) e uma Clo
    ```
 
    A implantação de Cloud Functions exige que o projeto Firebase tenha o faturamento/plano necessário habilitado.
-5. Publique o site em HTTPS, faça login em cada PC/celular e abra o menu de notificações. Escolha **Aceitar** para solicitar a permissão nativa do navegador e registrar o dispositivo, ou **Recusar** para não receber push nesse dispositivo. A escolha fica salva por conta e dispositivo; pode ser alterada depois. No iPhone, o site precisa ser adicionado à Tela de Início para receber notificações push.
+6. Publique o site em HTTPS, faça login em cada PC/celular e abra o menu de notificações. Escolha **Aceitar** para solicitar a permissão nativa do navegador e registrar o dispositivo, ou **Recusar** para não receber push nesse dispositivo. A escolha fica salva por conta e dispositivo; pode ser alterada depois. No iPhone, o site precisa ser adicionado à Tela de Início para receber notificações push.
 
 O botão de lixeira exclui a notificação do Firestore. Os avisos push são enviados para os dispositivos que ativaram notificações para a conta.
